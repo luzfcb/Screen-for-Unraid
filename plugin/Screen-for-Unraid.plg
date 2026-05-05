@@ -3,7 +3,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name        "Screen-for-Unraid">
 <!ENTITY author      "luzfcb">
-<!ENTITY version     "2026.05.05">
+<!ENTITY version     "2026.05.05b">
 <!ENTITY launch      "Settings/&name;">
 <!ENTITY pluginURL   "https://raw.githubusercontent.com/luzfcb/Screen-for-Unraid/main/plugin/Screen-for-Unraid.plg">
 <!ENTITY plgPATH     "/boot/config/plugins/&name;">
@@ -19,15 +19,12 @@
   <ICON>&iconPATH;</ICON>
 
   <CHANGES>
+### 2026.05.05b
+- Surgical fix for regex and awk syntax
+- Added debug information for checksum discovery
+
 ### 2026.05.05
-- Refactored to dynamically find the current build in Slackware repositories
-- Fixed checksum discovery pattern
-
-### 2026.01.23
-- Install screen package with automatic checksum validation and mirror fallback
-
-### 2024.06.11
-- Initial release
+- Refactored to dynamically find the current build
   </CHANGES>
 
   <FILE Run="/usr/bin/php">
@@ -41,7 +38,6 @@
     exit(1);
   }
 
-  // Best effort check, do not block install if this fails
   $plgFile = "/boot/config/plugins/&name;/&name;.plg";
   $installed = trim(shell_exec("plugin version " . escapeshellarg($plgFile) . " 2>/dev/null"));
 
@@ -62,7 +58,6 @@ mkdir -p "/usr/local/emhttp/plugins/&name;"
 
 find "&plgPATH;" -maxdepth 1 -type f -name "screen-*.txz" -delete 2>/dev/null || true
 
-# Download plugin icon
 if wget -q --timeout=20 --tries=2 -O "&iconPATH;" "&iconURL;"; then
   chmod 0644 "&iconPATH;" 2>/dev/null || true
 fi
@@ -112,19 +107,28 @@ if ! download_first_working "$sums_path" $sums_urls; then
   exit 1
 fi
 
-# Find the entry in CHECKSUMS.md5 (allowing for different path prefixes)
-line=$(grep -E "ap/screen-${pkg_ver}-${pkg_arch}-.+\.txz$" "$sums_path" | head -n 1)
+# DEBUG: Show content info
+echo "Debug: Checksum file downloaded ($(stat -c%s "$sums_path") bytes)"
+
+# Surgical change: Grep the package name directly and filter for .txz extension
+line=$(grep "screen-${pkg_ver}-${pkg_arch}-" "$sums_path" | grep "\.txz$" | head -n 1)
+
 if [ -z "$line" ]; then
+  echo "Debug: Failed to find pattern screen-${pkg_ver}-${pkg_arch}- in CHECKSUMS.md5"
+  echo "Debug: Last 3 lines of checksum file for context:"
+  tail -n 3 "$sums_path"
   echo "ERROR: Could not find build for screen-${pkg_ver}-${pkg_arch} in remote repository"
   exit 1
 fi
 
+echo "Debug: Found entry: $line"
+
 expected=$(echo "$line" | awk '{print $1}')
-remote_rel_path=$(echo "$line" | awk '{print $2}"' | sed 's|^\./||')
+remote_rel_path=$(echo "$line" | awk '{print $2}' | sed 's|^\./||')
 pkg_file=$(basename "$remote_rel_path")
 pkg_path="&plgPATH;/$pkg_file"
 
-echo "Downloading package"
+echo "Downloading package: $pkg_file"
 pkg_urls=""
 for root in $mirrors; do
   pkg_urls="$pkg_urls $root/slackware64/$remote_rel_path"
@@ -159,13 +163,10 @@ echo ""
   <FILE Run="/bin/bash" Method="remove">
     <INLINE>
 set -e
-
 removepkg screen 2>/dev/null || true
-
 rm -f "&plgPATH;/screen-*.txz" 2>/dev/null || true
 rm -f "&plgPATH;/CHECKSUMS.md5" 2>/dev/null || true
 rm -rf "&plgPATH;"
-
 rm -rf "/usr/local/emhttp/plugins/&name;"
 
 echo ""
