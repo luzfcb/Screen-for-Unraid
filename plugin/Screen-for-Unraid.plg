@@ -20,12 +20,11 @@
 
   <CHANGES>
 ### 2026.05.05
-- Refactored installer to dynamically discover current Slackware builds
-- Removed hardcoded build versioning to prevent checksum mismatches
-- Updated maintenance cleanup logic
+- Refactored to dynamically find the current build in Slackware repositories
+- Fixed checksum discovery pattern
 
 ### 2026.01.23
-- Install screen-5.0.1 with automatic checksum validation and mirror fallback
+- Install screen package with automatic checksum validation and mirror fallback
 
 ### 2024.06.11
 - Initial release
@@ -42,6 +41,7 @@
     exit(1);
   }
 
+  // Best effort check, do not block install if this fails
   $plgFile = "/boot/config/plugins/&name;/&name;.plg";
   $installed = trim(shell_exec("plugin version " . escapeshellarg($plgFile) . " 2>/dev/null"));
 
@@ -60,7 +60,6 @@
 mkdir -p "&plgPATH;"
 mkdir -p "/usr/local/emhttp/plugins/&name;"
 
-# Cleanup any previous builds to save space on flash
 find "&plgPATH;" -maxdepth 1 -type f -name "screen-*.txz" -delete 2>/dev/null || true
 
 # Download plugin icon
@@ -102,8 +101,7 @@ echo " Target: screen-$pkg_ver-$pkg_arch"
 echo "-----------------------------------------------------------"
 echo ""
 
-# 1. Fetch current checksums to identify the latest build
-echo "Fetching remote checksums..."
+echo "Downloading checksums"
 sums_urls=""
 for root in $mirrors; do
   sums_urls="$sums_urls $root/slackware64/CHECKSUMS.md5"
@@ -114,50 +112,44 @@ if ! download_first_working "$sums_path" $sums_urls; then
   exit 1
 fi
 
-# 2. Extract specific build info from the checksum list
-# Pattern matches: slackware64/ap/screen-[VERSION]-[ARCH]-[BUILD].txz
-line=$(grep -E "(\./)?slackware64/ap/screen-${pkg_ver}-${pkg_arch}-.+\.txz$" "$sums_path" | head -n 1)
-
+# Find the entry in CHECKSUMS.md5 (allowing for different path prefixes)
+line=$(grep -E "ap/screen-${pkg_ver}-${pkg_arch}-.+\.txz$" "$sums_path" | head -n 1)
 if [ -z "$line" ]; then
   echo "ERROR: Could not find build for screen-${pkg_ver}-${pkg_arch} in remote repository"
   exit 1
 fi
 
-expected_md5=$(echo "$line" | awk '{print $1}')
-remote_rel_path=$(echo "$line" | awk '{print $2}' | sed 's|^\./||')
+expected=$(echo "$line" | awk '{print $1}')
+remote_rel_path=$(echo "$line" | awk '{print $2}"' | sed 's|^\./||')
 pkg_file=$(basename "$remote_rel_path")
 pkg_path="&plgPATH;/$pkg_file"
 
-echo "Detected current build: $pkg_file"
-
-# 3. Download the discovered package
+echo "Downloading package"
 pkg_urls=""
 for root in $mirrors; do
-  pkg_urls="$pkg_urls $root/$remote_rel_path"
+  pkg_urls="$pkg_urls $root/slackware64/$remote_rel_path"
 done
 
-echo "Downloading package..."
 if ! download_first_working "$pkg_path" $pkg_urls; then
   echo "ERROR: Could not download $pkg_file from any mirror"
   exit 1
 fi
 
-# 4. Verification and Installation
-actual_md5=$(md5sum "$pkg_path" | awk '{print $1}')
-if [ "$actual_md5" != "$expected_md5" ]; then
+actual="$(md5sum "$pkg_path" | awk '{print $1}')"
+if [ "$actual" != "$expected" ]; then
   echo "ERROR: Checksum mismatch for $pkg_file"
-  echo "Expected: $expected_md5"
-  echo "Actual:   $actual_md5"
+  echo "Expected: $expected"
+  echo "Actual:   $actual"
   exit 1
 fi
 
-echo "Checksum verified. Installing package..."
+echo "Checksum verified"
 upgradepkg --install-new --reinstall "$pkg_path"
 
 echo ""
 echo "-----------------------------------------------------------"
 echo " &name; has been installed."
-echo " Copyright 2024-2026, &author;"
+echo " Copyright 2024, &author;"
 echo " Plugin version: &version;"
 echo "-----------------------------------------------------------"
 echo ""
@@ -179,6 +171,8 @@ rm -rf "/usr/local/emhttp/plugins/&name;"
 echo ""
 echo "-----------------------------------------------------------"
 echo " &name; has been removed."
+echo " Copyright 2024, &author;"
+echo " Plugin version: &version;"
 echo "-----------------------------------------------------------"
 echo ""
     </INLINE>
