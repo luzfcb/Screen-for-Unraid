@@ -2,18 +2,16 @@
 
 <!DOCTYPE PLUGIN [
 <!ENTITY name        "Screen-for-Unraid">
-<!ENTITY author      "trulow">
-<!ENTITY version     "2026.01.23">
+<!ENTITY author      "luzfcb">
+<!ENTITY version     "2026.05.05">
 <!ENTITY launch      "Settings/&name;">
-<!ENTITY pluginURL   "https://raw.githubusercontent.com/trulow/Screen-for-Unraid/main/plugin/Screen-for-Unraid.plg">
+<!ENTITY pluginURL   "https://raw.githubusercontent.com/luzfcb/Screen-for-Unraid/main/plugin/Screen-for-Unraid.plg">
 <!ENTITY plgPATH     "/boot/config/plugins/&name;">
-<!ENTITY iconURL     "https://raw.githubusercontent.com/trulow/Screen-for-Unraid/main/plugin-icon.png">
+<!ENTITY iconURL     "https://raw.githubusercontent.com/luzfcb/Screen-for-Unraid/main/plugin-icon.png">
 <!ENTITY iconPATH    "/usr/local/emhttp/plugins/&name;/&name;.png">
 
 <!ENTITY screenPkgVer  "5.0.1">
 <!ENTITY screenArch    "x86_64">
-<!ENTITY screenBuild   "1">
-<!ENTITY screenPkgFile "screen-&screenPkgVer;-&screenArch;-&screenBuild;.txz">
 ]>
 
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" min="6.11">
@@ -21,11 +19,16 @@
   <ICON>&iconPATH;</ICON>
 
   <CHANGES>
+### 2026.05.05
+- Refactored installer to dynamically discover current Slackware builds
+- Removed hardcoded build versioning to prevent checksum mismatches
+- Updated maintenance cleanup logic
+
 ### 2026.01.23
-- Install &screenPkgFile; with automatic checksum validation and mirror fallback
+- Install screen-5.0.1 with automatic checksum validation and mirror fallback
 
 ### 2024.06.11
-- Initial release to install screen-4.9.0-x86_64-1
+- Initial release
   </CHANGES>
 
   <FILE Run="/usr/bin/php">
@@ -39,12 +42,11 @@
     exit(1);
   }
 
-  // Best effort check, do not block install if this fails
-  $plgFile = "/boot/config/plugins/Screen-for-Unraid/Screen-for-Unraid.plg";
+  $plgFile = "/boot/config/plugins/&name;/&name;.plg";
   $installed = trim(shell_exec("plugin version " . escapeshellarg($plgFile) . " 2>/dev/null"));
 
   if ($installed && strpos($installed, "XML file doesn't exist") === false) {
-    if (version_compare($installed, "2026.01.23", ">=")) {
+    if (version_compare($installed, "&version;", ">=")) {
       echo "Installed plugin version ($installed) is up to date.\n";
       exit(0);
     }
@@ -58,7 +60,8 @@
 mkdir -p "&plgPATH;"
 mkdir -p "/usr/local/emhttp/plugins/&name;"
 
-find "&plgPATH;" -maxdepth 1 -type f -name "screen-*.txz" ! -name "&screenPkgFile;" -delete 2>/dev/null || true
+# Cleanup any previous builds to save space on flash
+find "&plgPATH;" -maxdepth 1 -type f -name "screen-*.txz" -delete 2>/dev/null || true
 
 # Download plugin icon
 if wget -q --timeout=20 --tries=2 -O "&iconPATH;" "&iconURL;"; then
@@ -73,8 +76,8 @@ exit 0
     <INLINE>
 set -e
 
-pkg_file="&screenPkgFile;"
-pkg_path="&plgPATH;/$pkg_file"
+pkg_ver="&screenPkgVer;"
+pkg_arch="&screenArch;"
 sums_path="&plgPATH;/CHECKSUMS.md5"
 
 mirrors="http://slackware.uk/slackware/slackware64-current http://mirrors.slackware.com/slackware/slackware64-current http://slackware.osuosl.org/slackware64-current"
@@ -91,54 +94,70 @@ download_first_working() {
   return 1
 }
 
-pkg_urls=""
-sums_urls=""
-for root in $mirrors; do
-  pkg_urls="$pkg_urls $root/slackware64/ap/$pkg_file"
-  sums_urls="$sums_urls $root/slackware64/CHECKSUMS.md5"
-done
-
 echo ""
 echo "-----------------------------------------------------------"
 echo " &name; installing"
 echo " Plugin version: &version;"
-echo " Screen package: $pkg_file"
+echo " Target: screen-$pkg_ver-$pkg_arch"
 echo "-----------------------------------------------------------"
 echo ""
 
-echo "Downloading checksums"
+# 1. Fetch current checksums to identify the latest build
+echo "Fetching remote checksums..."
+sums_urls=""
+for root in $mirrors; do
+  sums_urls="$sums_urls $root/slackware64/CHECKSUMS.md5"
+done
+
 if ! download_first_working "$sums_path" $sums_urls; then
   echo "ERROR: Could not download CHECKSUMS.md5 from any mirror"
   exit 1
 fi
 
-expected="$(grep -E " (\./)?(slackware64/)?ap/$pkg_file\$" "$sums_path" | awk '{print $1}' | head -n 1 || true)"
-if [ -z "$expected" ]; then
-  echo "ERROR: Could not find checksum entry for ap/$pkg_file"
+# 2. Extract specific build info from the checksum list
+# Pattern matches: slackware64/ap/screen-[VERSION]-[ARCH]-[BUILD].txz
+line=$(grep -E "(\./)?slackware64/ap/screen-${pkg_ver}-${pkg_arch}-.+\.txz$" "$sums_path" | head -n 1)
+
+if [ -z "$line" ]; then
+  echo "ERROR: Could not find build for screen-${pkg_ver}-${pkg_arch} in remote repository"
   exit 1
 fi
 
-echo "Downloading package"
+expected_md5=$(echo "$line" | awk '{print $1}')
+remote_rel_path=$(echo "$line" | awk '{print $2}' | sed 's|^\./||')
+pkg_file=$(basename "$remote_rel_path")
+pkg_path="&plgPATH;/$pkg_file"
+
+echo "Detected current build: $pkg_file"
+
+# 3. Download the discovered package
+pkg_urls=""
+for root in $mirrors; do
+  pkg_urls="$pkg_urls $root/$remote_rel_path"
+done
+
+echo "Downloading package..."
 if ! download_first_working "$pkg_path" $pkg_urls; then
   echo "ERROR: Could not download $pkg_file from any mirror"
   exit 1
 fi
 
-actual="$(md5sum "$pkg_path" | awk '{print $1}')"
-if [ "$actual" != "$expected" ]; then
+# 4. Verification and Installation
+actual_md5=$(md5sum "$pkg_path" | awk '{print $1}')
+if [ "$actual_md5" != "$expected_md5" ]; then
   echo "ERROR: Checksum mismatch for $pkg_file"
-  echo "Expected: $expected"
-  echo "Actual:   $actual"
+  echo "Expected: $expected_md5"
+  echo "Actual:   $actual_md5"
   exit 1
 fi
 
-echo "Checksum verified"
+echo "Checksum verified. Installing package..."
 upgradepkg --install-new --reinstall "$pkg_path"
 
 echo ""
 echo "-----------------------------------------------------------"
 echo " &name; has been installed."
-echo " Copyright 2024, &author;"
+echo " Copyright 2024-2026, &author;"
 echo " Plugin version: &version;"
 echo "-----------------------------------------------------------"
 echo ""
@@ -160,8 +179,6 @@ rm -rf "/usr/local/emhttp/plugins/&name;"
 echo ""
 echo "-----------------------------------------------------------"
 echo " &name; has been removed."
-echo " Copyright 2024, &author;"
-echo " Plugin version: &version;"
 echo "-----------------------------------------------------------"
 echo ""
     </INLINE>
